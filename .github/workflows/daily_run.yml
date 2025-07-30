@@ -1,10 +1,12 @@
-name: Execucao Diaria da Analise de Campanhas
+name: Execucao da Analise de Campanhas
 
 on:
   workflow_dispatch: # Permite iniciar manualmente pela interface do GitHub
   schedule:
-    # ATUALIZADO: Roda todos os dias às 02:30 UTC (23:30 no horário de Brasília)
-    - cron: '49 2 * * *'
+    # ATUALIZADO: Roda 3 vezes ao dia (horário de Brasília)
+    - cron: '30 3 * * *'  # Roda às 00:30 BRT
+    - cron: '0 11 * * *' # Roda às 08:00 BRT
+    - cron: '0 21 * * *' # Roda às 18:00 BRT
 
 jobs:
   run-analysis:
@@ -25,7 +27,6 @@ jobs:
 
       - name: 4. Executar o Script de Análise
         env:
-          # Passa os segredos do GitHub para o script como variáveis de ambiente
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           MELI_CLIENTS_CSV: ${{ secrets.MELI_CLIENTS_CSV }}
         run: python daily_run.py
