@@ -4,7 +4,8 @@ on:
   workflow_dispatch: # Permite iniciar manualmente pela interface do GitHub
   schedule:
     # Roda 3 vezes ao dia (horário de Brasília)
-    - cron: '50 3 * * *'  # Roda às 00:30 BRT
+    # Forçando a atualização do agendador
+    - cron: '45 3 * * *'  # Roda às 00:30 BRT
     - cron: '0 11 * * *' # Roda às 08:00 BRT
     - cron: '0 21 * * *' # Roda às 18:00 BRT
 
