@@ -1,13 +1,8 @@
 name: Execucao da Analise de Campanhas
 
 on:
-  workflow_dispatch: # Permite iniciar manualmente pela interface do GitHub
-  schedule:
-    # Roda 3 vezes ao dia (horário de Brasília)
-    # Forçando a atualização do agendador
-    - cron: '45 3 * * *'  # Roda às 00:30 BRT
-    - cron: '0 11 * * *' # Roda às 08:00 BRT
-    - cron: '0 21 * * *' # Roda às 18:00 BRT
+  # O único gatilho agora é o manual/externo, que o Google vai usar
+  workflow_dispatch:
 
 jobs:
   run-analysis:
