@@ -3,12 +3,13 @@ import requests
 import gspread
 import time
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo # Importa a biblioteca para fusos horários
 import logging
 from google.oauth2.service_account import Credentials
 import os
 import json
 from io import StringIO
-import toml # Importa a biblioteca toml
+import toml
 
 # --- Configuração do Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -72,12 +73,60 @@ def get_new_access_token(client_info):
 
 # --- Módulo de Coleta de Dados ---
 class MercadoLivreAdsCollector:
-    # ... (O código da classe continua o mesmo)
     def __init__(self, access_token):
         self.access_token = access_token
         self.base_url = "https://api.mercadolibre.com"
         self.session = requests.Session()
         self.session.headers.update({"Authorization": f"Bearer {self.access_token}", "Content-Type": "application/json"})
+
+    def get_user_id(self):
+        try:
+            response = self.session.get(f"{self.base_url}/users/me")
+            response.raise_for_status()
+            return response.json().get('id')
+        except Exception as e:
+            logger.error(f"Erro ao obter ID do usuário: {e}")
+            return None
+
+    def get_orders_metrics(self, seller_id, date_from, date_to):
+        all_orders, offset = [], 0
+        date_from_str, date_to_str = f"{date_from}T00:00:00.000-03:00", f"{date_to}T23:59:59.999-03:00"
+        logger.info("Coletando métricas de negócio (pedidos)...")
+        while True:
+            try:
+                params = {"seller": seller_id, "order.date_created.from": date_from_str, "order.date_created.to": date_to_str, "limit": 50, "offset": offset, "sort": "date_desc"}
+                response = self.session.get(f"{self.base_url}/orders/search", params=params)
+                response.raise_for_status()
+                data = response.json()
+                results = data.get('results', [])
+                if not results: break
+                all_orders.extend(results)
+                if offset + 50 >= data.get('paging', {}).get('total', 0): break
+                offset += 50
+                time.sleep(0.2)
+            except Exception as e:
+                logger.error(f"Erro ao buscar pedidos: {e}")
+                break
+        if not all_orders: return {}
+        valid_orders = [o for o in all_orders if o.get('status') in ['paid', 'shipped', 'delivered']]
+        vendas_brutas = sum(o.get('total_amount', 0) for o in valid_orders)
+        return {
+            "faturamento_bruto": f"R$ {vendas_brutas:,.2f}",
+            "unidades_vendidas": sum(item.get('quantity', 0) for o in valid_orders for item in o.get('order_items', [])),
+            "total_de_vendas": len(valid_orders),
+            "ticket_medio": f"R$ {vendas_brutas / len(valid_orders):,.2f}" if valid_orders else "R$ 0,00"
+        }
+
+    def get_ads_summary_metrics(self, advertiser_id, date_from, date_to):
+        logger.info("Buscando resumo de métricas de publicidade...")
+        try:
+            params = {"date_from": date_from, "date_to": date_to, "metrics_summary": "true", "metrics": "cost,acos"}
+            response = self.session.get(f"{self.base_url}/advertising/advertisers/{advertiser_id}/product_ads/campaigns", params=params, headers={"Api-Version": "2"})
+            response.raise_for_status()
+            return response.json().get("metrics_summary", {})
+        except Exception as e:
+            logger.error(f"Erro ao obter resumo de publicidade: {e}")
+            return None
 
     def get_all_campaigns_paginated(self, advertiser_id, date_from, date_to):
         all_campaigns, offset = [], 0
@@ -93,7 +142,8 @@ class MercadoLivreAdsCollector:
                 if not results: break
                 all_campaigns.extend(results)
                 if offset + 50 >= data.get('paging', {}).get('total', 0): break
-                offset += 50; time.sleep(0.2)
+                offset += 50
+                time.sleep(0.2)
             except Exception as e:
                 logger.error(f"Erro ao buscar campanhas: {e}")
                 break
@@ -108,7 +158,7 @@ class MercadoLivreAdsCollector:
             logger.error(f"Erro ao obter anunciantes: {e}")
             return None
 
-# --- Módulo de Exportação ---
+# --- Módulo de Exportação com Verificação ---
 def export_to_google_sheets(df, sheet_name, worksheet_name, google_creds):
     logger.info(f"Exportando para a aba '{worksheet_name}'...")
     try:
@@ -121,22 +171,30 @@ def export_to_google_sheets(df, sheet_name, worksheet_name, google_creds):
         except gspread.WorksheetNotFound:
             worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows="1", cols=len(df.columns))
         
+        initial_row_count = len(worksheet.get_all_records())
         new_header = df.columns.tolist()
+        data_to_send = df.fillna("").astype(str).values.tolist()
         try:
             existing_header = worksheet.row_values(1)
         except gspread.exceptions.APIError:
             existing_header = []
-
         if new_header != existing_header:
-            logger.info("Cabeçalho diferente. Reescrevendo a aba.")
             worksheet.clear()
-            worksheet.update([new_header] + df.fillna("").astype(str).values.tolist(), value_input_option='USER_ENTERED')
+            worksheet.update([new_header] + data_to_send, value_input_option='USER_ENTERED')
+            expected_row_count = len(data_to_send)
         else:
-            logger.info("Anexando novas linhas.")
-            worksheet.append_rows(df.fillna("").astype(str).values.tolist(), value_input_option='USER_ENTERED')
+            worksheet.append_rows(data_to_send, value_input_option='USER_ENTERED')
+            expected_row_count = initial_row_count + len(data_to_send)
+        
+        time.sleep(3)
+        final_row_count = len(worksheet.get_all_records())
+        if final_row_count >= expected_row_count:
+            logger.info(f"VERIFICAÇÃO BEM-SUCEDIDA: As linhas foram adicionadas na aba '{worksheet_name}'.")
+        else:
+            logger.error(f"FALHA NA VERIFICAÇÃO: As linhas não foram adicionadas na aba '{worksheet_name}'.")
         return spreadsheet.url
     except Exception as e:
-        logger.error(f"ERRO AO EXPORTAR PARA '{worksheet_name}': {e}")
+        logger.error(f"ERRO AO EXPORTAR PARA '{worksheet_name}': {e}", exc_info=True)
         return None
 
 # --- Lógica Principal da Automação ---
@@ -144,38 +202,35 @@ def main():
     logger.info("Iniciando a execução diária do analisador de campanhas.")
     
     try:
-        # CORREÇÃO: Usando os nomes exatos do arquivo YAML
         google_creds_str = os.environ['GOOGLE_CREDENTIALS']
         clients_csv_data = os.environ['MELI_CLIENTS_CSV']
-        
         google_creds = toml.loads(google_creds_str)['google_credentials']
         clients_df = pd.read_csv(StringIO(clients_csv_data))
-        
-    except KeyError as e:
-        logger.error(f"ERRO: O segredo '{e.args[0]}' não foi encontrado no ambiente do GitHub Actions.")
-        return
     except Exception as e:
-        logger.error(f"ERRO ao carregar as credenciais: {e}")
+        logger.error(f"ERRO CRÍTICO ao carregar as credenciais: {e}")
         return
 
     if clients_df.empty:
         logger.warning("Nenhum cliente encontrado no CSV para processar.")
         return
 
+    brasil_timezone = ZoneInfo("America/Sao_Paulo")
+    
     for index, client_info in clients_df.iterrows():
         client_name = client_info["client_name"]
         logger.info("\n" + "="*50 + f"\nProcessando cliente: {client_name}\n" + "="*50)
         
         try:
-            logger.info("Autenticando e obtendo novo access token...")
             access_token = get_new_access_token(client_info)
             if not access_token:
-                logger.error(f"Falha ao obter access token para {client_name}. Pulando para o próximo.")
+                logger.error(f"Falha ao obter access token para {client_name}. Pulando.")
                 continue
 
             collector = MercadoLivreAdsCollector(access_token)
-            end_date = datetime.now()
+            end_date = datetime.now(brasil_timezone)
             start_date = end_date - timedelta(days=30)
+            date_from_str = start_date.strftime('%Y-%m-%d')
+            date_to_str = end_date.strftime('%Y-%m-%d')
             
             advertisers_data = collector.get_advertisers()
             if not advertisers_data or not advertisers_data.get('advertisers'):
@@ -185,18 +240,36 @@ def main():
             advertiser = advertisers_data['advertisers'][0]
             advertiser_id = advertiser['advertiser_id']
             client_name_from_api = advertiser.get('advertiser_name', client_name)
-
             logger.info(f"Anunciante encontrado: {client_name_from_api} (ID: {advertiser_id})")
+
+            timestamp_geracao = datetime.now(brasil_timezone).strftime('%Y-%m-%d %H:%M:%S')
+            periodo_consulta = f"{date_from_str} a {date_to_str}"
+
+            # 1. Métricas Gerais
+            user_id = collector.get_user_id()
+            if user_id:
+                business_metrics = collector.get_orders_metrics(user_id, date_from_str, date_to_str)
+                if business_metrics:
+                    df_business = pd.DataFrame(list(business_metrics.items()), columns=['Metrica', 'Valor'])
+                    df_business.insert(0, 'data_geracao', timestamp_geracao)
+                    df_business.insert(1, 'periodo_consulta', periodo_consulta)
+                    export_to_google_sheets(df_business, "Dashboard Meli - Resultados", f"{client_name_from_api} - Metricas Gerais", google_creds)
             
-            campaigns_data = collector.get_all_campaigns_paginated(advertiser_id, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
-            
+            # 2. Métricas de Publicidade
+            ads_metrics = collector.get_ads_summary_metrics(advertiser_id, date_from_str, date_to_str)
+            if ads_metrics:
+                df_ads = pd.DataFrame(list(ads_metrics.items()), columns=['Metrica', 'Valor'])
+                df_ads.insert(0, 'data_geracao', timestamp_geracao)
+                df_ads.insert(1, 'periodo_consulta', periodo_consulta)
+                export_to_google_sheets(df_ads, "Dashboard Meli - Resultados", f"{client_name_from_api} - Metricas Publicidade", google_creds)
+
+            # 3. Análise de Estratégia
+            campaigns_data = collector.get_all_campaigns_paginated(advertiser_id, date_from_str, date_to_str)
             if campaigns_data:
                 df_campaigns_raw = pd.json_normalize(campaigns_data)
                 logger.info("Realizando analise estrategica...")
                 df_analysis = analyze_and_consolidate(df_campaigns_raw)
                 
-                timestamp_geracao = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                periodo_consulta = f"{start_date.strftime('%Y-%m-%d')} a {end_date.strftime('%Y-%m-%d')}"
                 df_analysis.insert(0, 'data_geracao', timestamp_geracao)
                 df_analysis.insert(1, 'periodo_consulta', periodo_consulta)
                 
@@ -205,12 +278,12 @@ def main():
                 
                 export_to_google_sheets(df_analysis[colunas_existentes], "Dashboard Meli - Resultados", f"{client_name_from_api} - Analise de Estrategia", google_creds)
                 
-                logger.info(f"Análise para {client_name_from_api} concluída e exportada.")
+                logger.info(f"Processo de análise para {client_name_from_api} concluído.")
             else:
                 logger.info(f"Nenhuma campanha encontrada para {client_name_from_api} no período.")
 
         except Exception as e:
-            logger.error(f"ERRO INESPERADO ao processar {client_name}: {e}")
+            logger.error(f"ERRO INESPERADO ao processar {client_name}: {e}", exc_info=True)
             continue
             
     logger.info("\nExecução diária finalizada.")
