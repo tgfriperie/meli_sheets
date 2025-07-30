@@ -6,92 +6,78 @@ import time
 from datetime import datetime, timedelta
 import logging
 from google.oauth2.service_account import Credentials
+import os
 
 # --- Configuração da Página e Logging ---
 st.set_page_config(
-    page_title="Exportador e Analisador Meli",
+    page_title="Analisador Meli Multi-Cliente",
     layout="centered"
 )
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# --- Constantes de Configuração ---
+CLIENTS_FILE = "clients.csv"
 
-# --- Módulo de Análise de Estratégia (Lógica Refinada) ---
+# --- Módulo de Autenticação Automática ---
+def get_new_access_token(client_info):
+    """Usa o refresh token e as credenciais do cliente para obter um novo access token."""
+    url = "https://api.mercadolibre.com/oauth/token"
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    data = {
+        "grant_type": "refresh_token",
+        "client_id": client_info["app_id"],
+        "client_secret": client_info["client_secret"],
+        "refresh_token": client_info["refresh_token"]
+    }
+    try:
+        response = requests.post(url, headers=headers, data=data)
+        response.raise_for_status()
+        return response.json()["access_token"]
+    except requests.exceptions.RequestException as e:
+        st.error(f"Erro ao renovar o Access Token: {e.response.json()}")
+        return None
+
+# --- Módulo de Análise de Estratégia ---
 hardcoded_strategy_model_data = [
-    {"Nome": "01A - Hig Perforrmance Stage1", "Orçamento": 4500, "ACOS Objetivo": 8, "ACOS": 8, "Tipo de Impressão": "Baixa Impressão", "% de impressões ganhas": 10, "% de impressões perdidas por orçamento": 0, "% de impressões perdidas por classificação": 80, "Cliques": 1, "(Investimento / Receitas)": "10 á abaixo", "Unidades vendidas por publicidade": 10, "Quantidade": 1},
-    {"Nome": "01B - High Performance Stage2", "Orçamento": 1800, "ACOS Objetivo": 7, "ACOS": 7, "Tipo de Impressão": "Media Impressão", "% de impressões ganhas": 25, "% de impressões perdidas por orçamento": 0, "% de impressões perdidas por classificação": 75, "Cliques": 1, "(Investimento / Receitas)": "10 á abaixo", "Unidades vendidas por publicidade": 10, "Quantidade": 5},
-    {"Nome": "01C - High Performance Stage3", "Orçamento": 2200, "ACOS Objetivo": 8, "ACOS": 8, "Tipo de Impressão": "Impressões elevadas", "% de impressões ganhas": 50, "% de impressões perdidas por orçamento": 0, "% de impressões perdidas por classificação": 50, "Cliques": 0, "(Investimento / Receitas)": "10 á abaixo", "Unidades vendidas por publicidade": 10, "Quantidade": 0},
-    {"Nome": "Aceleração dinamica 20/8", "Orçamento": 20000, "ACOS Objetivo": 8, "ACOS": 8, "Tipo de Impressão": "Media Impressão", "% de impressões ganhas": 25, "% de impressões perdidas por orçamento": 0, "% de impressões perdidas por classificação": 75, "Cliques": 50, "(Investimento / Receitas)": "10 á abaixo", "Unidades vendidas por publicidade": 10, "Quantidade": 100},
-    {"Nome": "Aceleração dinamica 850/22", "Orçamento": 850, "ACOS Objetivo": 22, "ACOS": 22, "Tipo de Impressão": "Media Impressão", "% de impressões ganhas": 15, "% de impressões perdidas por orçamento": 0, "% de impressões perdidas por classificação": 85, "Cliques": 100, "(Investimento / Receitas)": "10 á abaixo", "Unidades vendidas por publicidade": 10, "Quantidade": 50},
-    {"Nome": "Aceleração dinamica 20/20", "Orçamento": 20000, "ACOS Objetivo": 20, "ACOS": 20, "Tipo de Impressão": "Baixa Impressão", "% de impressões ganhas": 50, "% de impressões perdidas por orçamento": 0, "% de impressões perdidas por classificação": 50, "Cliques": 10, "(Investimento / Receitas)": "10 acima", "Unidades vendidas por publicidade": 20, "Quantidade": 1},
-    {"Nome": "Aceleração dinamica 10/08", "Orçamento": 10000, "ACOS Objetivo": 8, "ACOS": 8, "Tipo de Impressão": "Impressões elevadas", "% de impressões ganhas": 75, "% de impressões perdidas por orçamento": 0, "% de impressões perdidas por classificação": 25, "Cliques": 100, "(Investimento / Receitas)": "10 á abaixo", "Unidades vendidas por publicidade": 10, "Quantidade": 0},
-    {"Nome": "Alavanca Full", "Orçamento": 1000, "ACOS Objetivo": 45, "ACOS": 45, "Tipo de Impressão": "Impressões elevadas", "% de impressões ganhas": 50, "% de impressões perdidas por orçamento": 0, "% de impressões perdidas por classificação": 50, "Cliques": 100, "(Investimento / Receitas)": "10 acima", "Unidades vendidas por publicidade": 20, "Quantidade": 0},
-    {"Nome": "Anuncio Novo Stage1", "Orçamento": 5000, "ACOS Objetivo": 8, "ACOS": 8, "Tipo de Impressão": "Baixa Impressão", "% de impressões ganhas": 15, "% de impressões perdidas por orçamento": 0, "% de impressões perdidas por classificação": 85, "Cliques": 500, "(Investimento / Receitas)": "10 á abaixo", "Unidades vendidas por publicidade": 10, "Quantidade": 50},
-    {"Nome": "Anuncio Novo Stage2", "Orçamento": 15000, "ACOS Objetivo": 3, "ACOS": 3, "Tipo de Impressão": "Media Impressão", "% de impressões ganhas": 50, "% de impressões perdidas por orçamento": 0, "% de impressões perdidas por classificação": 50, "Cliques": 500, "(Investimento / Receitas)": "10 á abaixo", "Unidades vendidas por publicidade": 10, "Quantidade": 100},
-    {"Nome": "Anuncio Novo Stage3", "Orçamento": 10000, "ACOS Objetivo": 8, "ACOS": 8, "Tipo de Impressão": "Impressões elevadas", "% de impressões ganhas": 75, "% de impressões perdidas por orçamento": 0, "% de impressões perdidas por classificação": 25, "Cliques": 1000, "(Investimento / Receitas)": "10 á abaixo", "Unidades vendidas por publicidade": 10, "Quantidade": 500},
-    {"Nome": "Acos Elevado", "Orçamento": 50, "ACOS Objetivo": 6, "ACOS": 6, "Tipo de Impressão": "Baixa Impressão", "% de impressões ganhas": 50, "% de impressões perdidas por orçamento": 0, "% de impressões perdidas por classificação": 50, "Cliques": 1000, "(Investimento / Receitas)": "10 acima", "Unidades vendidas por publicidade": 20, "Quantidade": 500},
-    {"Nome": "Recorrencia de vendas", "Orçamento": 15, "ACOS Objetivo": 5, "ACOS": 5, "Tipo de Impressão": "Impressões elevadas", "% de impressões ganhas": 65, "% de impressões perdidas por orçamento": 0, "% de impressões perdidas por classificação": 35, "Cliques": 1000, "(Investimento / Receitas)": "10 á abaixo", "Unidades vendidas por publicidade": 10, "Quantidade": 1000}
+    {"Nome": "01A - Hig Perforrmance Stage1", "Orçamento": 4500, "ACOS Objetivo": 8, "ACOS": 8},
+    {"Nome": "01B - High Performance Stage2", "Orçamento": 1800, "ACOS Objetivo": 7, "ACOS": 7},
+    {"Nome": "01C - High Performance Stage3", "Orçamento": 2200, "ACOS Objetivo": 8, "ACOS": 8},
+    {"Nome": "Aceleração dinamica 20/8", "Orçamento": 20000, "ACOS Objetivo": 8, "ACOS": 8},
+    {"Nome": "Aceleração dinamica 850/22", "Orçamento": 850, "ACOS Objetivo": 22, "ACOS": 22},
+    {"Nome": "Aceleração dinamica 20/20", "Orçamento": 20000, "ACOS Objetivo": 20, "ACOS": 20},
+    {"Nome": "Aceleração dinamica 10/08", "Orçamento": 10000, "ACOS Objetivo": 8, "ACOS": 8},
+    {"Nome": "Alavanca Full", "Orçamento": 1000, "ACOS Objetivo": 45, "ACOS": 45},
+    {"Nome": "Anuncio Novo Stage1", "Orçamento": 5000, "ACOS Objetivo": 8, "ACOS": 8},
+    {"Nome": "Anuncio Novo Stage2", "Orçamento": 15000, "ACOS Objetivo": 3, "ACOS": 3},
+    {"Nome": "Anuncio Novo Stage3", "Orçamento": 10000, "ACOS Objetivo": 8, "ACOS": 8},
+    {"Nome": "Acos Elevado", "Orçamento": 50, "ACOS Objetivo": 6, "ACOS": 6},
+    {"Nome": "Recorrencia de vendas", "Orçamento": 15, "ACOS Objetivo": 5, "ACOS": 5}
 ]
 
 def find_best_strategy(campaign_row, strategy_model_df):
-    """Encontra a melhor estratégia para uma campanha com base na menor diferença de ACOS."""
     best_match_name = "Nenhuma estrategia recomendada"
     min_acos_diff = float("inf")
-    
-    # CORREÇÃO: Usa o nome correto da coluna ('metrics.acos') e trata valores nulos.
     campaign_acos = campaign_row.get("metrics.acos", 0) or 0
-    
     for _, strategy_row in strategy_model_df.iterrows():
         strategy_acos = strategy_row.get("ACOS", 0)
         acos_diff = abs(campaign_acos - strategy_acos)
-        
         if acos_diff < min_acos_diff:
             min_acos_diff = acos_diff
             best_match_name = strategy_row.get("Nome")
-            
     return best_match_name
 
 def analyze_and_consolidate(campaigns_df):
-    """Aplica a recomendação e consolida os dados para uma análise clara e correta."""
-    if campaigns_df.empty:
-        return pd.DataFrame()
-        
+    if campaigns_df.empty: return pd.DataFrame()
     strategy_model_df = pd.DataFrame(hardcoded_strategy_model_data)
-    
-    # 1. Recomendar a estratégia
-    campaigns_df["Estrategia_Recomendada"] = campaigns_df.apply(
-        lambda row: find_best_strategy(row, strategy_model_df), axis=1
-    )
-    
-    # 2. Preparar dados da estratégia para o merge
-    strategy_data_for_merge = strategy_model_df.rename(columns={
-        "Nome": "Estrategia_Nome_Match",
-        "Orçamento": "Orcamento_Recomendado",
-        "ACOS": "ACOS_Recomendado"
-    })
-    
-    # 3. Juntar dados da campanha com os da estratégia recomendada
-    consolidated_df = pd.merge(
-        campaigns_df,
-        strategy_data_for_merge,
-        how="left",
-        left_on="Estrategia_Recomendada",
-        right_on="Estrategia_Nome_Match"
-    )
-    
-    # 4. Renomear colunas para clareza e corrigir o nome da coluna de ACOS
-    consolidated_df = consolidated_df.rename(columns={
-        "name": "Nome_Campanha",
-        "budget": "Orcamento_Campanha",
-        "metrics.acos": "ACOS_Campanha" # CORREÇÃO CRÍTICA
-    })
-    
+    campaigns_df["Estrategia_Recomendada"] = campaigns_df.apply(lambda row: find_best_strategy(row, strategy_model_df), axis=1)
+    strategy_data_for_merge = strategy_model_df.rename(columns={"Nome": "Estrategia_Nome_Match", "Orçamento": "Orcamento_Recomendado", "ACOS": "ACOS_Recomendado"})
+    consolidated_df = pd.merge(campaigns_df, strategy_data_for_merge, how="left", left_on="Estrategia_Recomendada", right_on="Estrategia_Nome_Match")
+    consolidated_df = consolidated_df.rename(columns={"name": "Nome_Campanha", "budget": "Orcamento_Campanha", "metrics.acos": "ACOS_Campanha"})
     return consolidated_df
-
 
 # --- Módulo de Coleta de Dados do Mercado Livre ---
 class MercadoLivreAdsCollector:
-    """Coletor de dados de anúncios e métricas do Mercado Livre."""
     def __init__(self, access_token):
         self.access_token = access_token
         self.base_url = "https://api.mercadolibre.com"
@@ -175,11 +161,9 @@ class MercadoLivreAdsCollector:
                     break
         return all_campaigns
 
-
 # --- Módulo de Exportação para Google Sheets ---
 def export_to_google_sheets(df, sheet_name, worksheet_name):
-    """Exporta um DataFrame para o Google Sheets, anexando os dados de forma inteligente."""
-    with st.spinner(f"Verificando e exportando para a aba '{worksheet_name}'..."):
+    with st.spinner(f"Exportando para a aba '{worksheet_name}'..."):
         try:
             scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
             creds = Credentials.from_service_account_info(st.secrets["google_credentials"], scopes=scopes)
@@ -206,37 +190,61 @@ def export_to_google_sheets(df, sheet_name, worksheet_name):
             st.error(f"ERRO AO EXPORTAR PARA '{worksheet_name}': {e}")
             return None
 
-
 # --- Interface do Usuário ---
-st.title("Exportador e Analisador de Dados do Mercado Livre")
+st.title("Analisador de Dados do Mercado Livre - Multi-Cliente")
+
+def load_clients():
+    if os.path.exists(CLIENTS_FILE):
+        try:
+            return pd.read_csv(CLIENTS_FILE)
+        except pd.errors.EmptyDataError:
+            return pd.DataFrame(columns=['client_name', 'app_id', 'client_secret', 'refresh_token'])
+    return None
+
+clients_df = load_clients()
+
 with st.sidebar:
     st.header("Configuracoes")
-    access_token = st.text_input("Access Token do Mercado Livre", type="password")
-    end_date_default = datetime.now()
-    start_date_default = end_date_default - timedelta(days=30)
-    date_range = st.date_input("Selecione o Periodo de Analise", (start_date_default, end_date_default), format="DD/MM/YYYY")
+
+    if clients_df is not None and not clients_df.empty:
+        client_name_list = clients_df["client_name"].tolist()
+        selected_client_name = st.selectbox("Selecione um Cliente", client_name_list)
+        
+        client_info = clients_df[clients_df["client_name"] == selected_client_name].iloc[0]
+        
+    else:
+        st.warning(f"Nenhum cliente cadastrado. Execute 'onboarding.py' para adicionar clientes.")
+        selected_client_name = None
+
+    date_range = st.date_input("Selecione o Periodo de Analise", (datetime.now() - timedelta(days=30), datetime.now()), format="DD/MM/YYYY")
     sheet_name = st.text_input("Nome da Planilha no Google Sheets", "Dashboard Meli - Resultados")
-    start_button = st.button("Iniciar Coleta e Exportacao", type="primary", use_container_width=True)
+    start_button = st.button("Iniciar Coleta e Exportacao", type="primary", use_container_width=True, disabled=(selected_client_name is None))
 
 # --- Lógica Principal ---
-if start_button:
+if start_button and selected_client_name:
+    
+    with st.spinner(f"Autenticando para {selected_client_name}..."):
+        access_token = get_new_access_token(client_info)
+
     if not access_token:
-        st.warning("Por favor, insira o Access Token do Mercado Livre.")
+        st.error("Falha na autenticação. Verifique as credenciais do cliente ou se a autorização expirou.")
     elif not st.secrets.get("google_credentials"):
         st.error("As credenciais do Google Sheets nao foram configuradas nos Secrets do Streamlit.")
     elif not date_range or len(date_range) != 2:
         st.warning("Por favor, selecione um periodo de datas valido.")
     else:
         start_date, end_date = date_range
-        st.info(f"Iniciando processo para o periodo de {start_date.strftime('%d/%m/%Y')} a {end_date.strftime('%d/%m/%Y')}...")
+        st.info(f"Iniciando processo para o cliente: {selected_client_name}...")
+        
         collector = MercadoLivreAdsCollector(access_token)
-        advertisers = collector.get_advertisers()
-
-        if advertisers and advertisers.get('advertisers'):
-            advertiser = advertisers['advertisers'][0]
+        
+        advertisers_data = collector.get_advertisers()
+        if advertisers_data and advertisers_data.get('advertisers'):
+            advertiser = advertisers_data['advertisers'][0]
             advertiser_id = advertiser['advertiser_id']
-            client_name = advertiser.get('advertiser_name', f"Advertiser_{advertiser_id}")
-            st.write(f"Anunciante encontrado: {client_name}")
+            client_name_from_api = advertiser.get('advertiser_name', selected_client_name)
+            
+            st.write(f"Anunciante encontrado: {client_name_from_api} (ID: {advertiser_id})")
             timestamp_geracao = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             periodo_consulta = f"{start_date.strftime('%Y-%m-%d')} a {end_date.strftime('%Y-%m-%d')}"
 
@@ -248,19 +256,18 @@ if start_button:
                     df_business = pd.DataFrame(list(business_metrics.items()), columns=['Metrica', 'Valor'])
                     df_business.insert(0, 'data_geracao', timestamp_geracao)
                     df_business.insert(1, 'periodo_consulta', periodo_consulta)
-                    export_to_google_sheets(df_business, sheet_name, f"{client_name} - Metricas Gerais")
+                    export_to_google_sheets(df_business, sheet_name, f"{client_name_from_api} - Metricas Gerais")
 
             ads_metrics = collector.get_ads_summary_metrics(advertiser_id, start_date, end_date)
             if ads_metrics:
                 df_ads = pd.DataFrame(list(ads_metrics.items()), columns=['Metrica', 'Valor'])
                 df_ads.insert(0, 'data_geracao', timestamp_geracao)
                 df_ads.insert(1, 'periodo_consulta', periodo_consulta)
-                export_to_google_sheets(df_ads, sheet_name, f"{client_name} - Metricas Publicidade")
+                export_to_google_sheets(df_ads, sheet_name, f"{client_name_from_api} - Metricas Publicidade")
 
             # 2. Coletar e Analisar Dados de Campanhas
             campaigns_data = collector.get_all_campaigns_paginated(advertiser_id, start_date, end_date)
             if campaigns_data:
-                # CORREÇÃO: Usar json_normalize sem separador para obter 'metrics.acos'
                 df_campaigns_raw = pd.json_normalize(campaigns_data)
                 
                 st.info("Realizando analise estrategica das campanhas...")
@@ -278,11 +285,11 @@ if start_button:
                 ]
                 colunas_existentes = [col for col in colunas_finais if col in df_analysis.columns]
                 
-                url = export_to_google_sheets(df_analysis[colunas_existentes], sheet_name, f"{client_name} - Analise de Estrategia")
+                url = export_to_google_sheets(df_analysis[colunas_existentes], sheet_name, f"{client_name_from_api} - Analise de Estrategia")
 
                 if url:
                     st.success(f"Processo finalizado! Acesse a planilha aqui: {url}")
             else:
                 st.info("Nenhum dado detalhado de campanha foi encontrado para o periodo.")
         else:
-            st.error("Nenhum anunciante encontrado. Verifique seu Access Token.")
+            st.error("Nenhum anunciante encontrado com o token de acesso gerado.")

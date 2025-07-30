@@ -4,7 +4,7 @@ on:
   workflow_dispatch: # Permite iniciar manualmente pela interface do GitHub
   schedule:
     # ATUALIZADO: Roda todos os dias às 02:30 UTC (23:30 no horário de Brasília)
-    - cron: '30 2 * * *'
+    - cron: '49 2 * * *'
 
 jobs:
   run-analysis:
