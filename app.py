@@ -13,7 +13,7 @@ st.set_page_config(
     page_title="Analisador Meli Multi-Cliente",
     layout="centered"
 )
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # --- Constantes de Configuração ---
@@ -88,7 +88,7 @@ class MercadoLivreAdsCollector:
         try:
             response = self.session.get(f"{self.base_url}/users/me")
             response.raise_for_status()
-            return response.json().get('id')
+            return response.json().get("id")
         except requests.exceptions.RequestException as e:
             st.error(f"Erro ao obter ID do usuário: {e}")
             return None
@@ -96,8 +96,8 @@ class MercadoLivreAdsCollector:
     def get_orders_metrics(self, seller_id, date_from, date_to):
         all_orders = []
         offset = 0
-        date_from_str = f"{date_from.strftime('%Y-%m-%d')}T00:00:00.000-03:00"
-        date_to_str = f"{date_to.strftime('%Y-%m-%d')}T23:59:59.999-03:00"
+        date_from_str = f"{date_from.strftime("%Y-%m-%d")}T00:00:00.000-03:00"
+        date_to_str = f"{date_to.strftime("%Y-%m-%d")}T23:59:59.999-03:00"
         with st.spinner("Coletando métricas de negócio (pedidos)..."):
             while True:
                 try:
@@ -105,30 +105,30 @@ class MercadoLivreAdsCollector:
                     response = self.session.get(f"{self.base_url}/orders/search", params=params)
                     response.raise_for_status()
                     data = response.json()
-                    results = data.get('results', [])
+                    results = data.get("results", [])
                     if not results: break
                     all_orders.extend(results)
-                    if offset + 50 >= data.get('paging', {}).get('total', 0): break
+                    if offset + 50 >= data.get("paging", {}).get("total", 0): break
                     offset += 50
                     time.sleep(0.1)
                 except requests.exceptions.RequestException as e:
                     st.error(f"Erro ao buscar pedidos: {e}")
                     break
         if not all_orders: return {}
-        valid_orders = [o for o in all_orders if o.get('status') in ['paid', 'shipped', 'delivered']]
-        vendas_brutas = sum(o.get('total_amount', 0) for o in valid_orders)
-        return {"faturamento_bruto": f"R$ {vendas_brutas:,.2f}", "unidades_vendidas": sum(item.get('quantity', 0) for o in valid_orders for item in o.get('order_items', [])), "total_de_vendas": len(valid_orders), "ticket_medio": f"R$ {vendas_brutas / len(valid_orders):,.2f}" if valid_orders else "R$ 0,00"}
+        valid_orders = [o for o in all_orders if o.get("status") in ["paid", "shipped", "delivered"]]
+        vendas_brutas = sum(o.get("total_amount", 0) for o in valid_orders)
+        return {"faturamento_bruto": f"R$ {vendas_brutas:,.2f}", "unidades_vendidas": sum(item.get("quantity", 0) for o in valid_orders for item in o.get("order_items", [])), "total_de_vendas": len(valid_orders), "ticket_medio": f"R$ {vendas_brutas / len(valid_orders):,.2f}" if valid_orders else "R$ 0,00"}
 
     def get_ads_summary_metrics(self, advertiser_id, date_from, date_to):
         with st.spinner("Buscando resumo de métricas de publicidade..."):
             try:
-                params = {"date_from": date_from.strftime('%Y-%m-%d'), "date_to": date_to.strftime('%Y-%m-%d'), "metrics_summary": "true", "metrics": "cost,acos"}
+                params = {"date_from": date_from.strftime("%Y-%m-%d"), "date_to": date_to.strftime("%Y-%m-%d"), "metrics_summary": "true", "metrics": "cost,acos,direct_amount,indirect_amount,total_amount"}
                 response = self.session.get(f"{self.base_url}/advertising/advertisers/{advertiser_id}/product_ads/campaigns", params=params, headers={"Api-Version": "2"})
                 response.raise_for_status()
                 return response.json().get("metrics_summary", {})
             except requests.exceptions.RequestException as e:
                 st.error(f"Erro ao obter resumo de publicidade: {e}")
-                return None
+                return {}
 
     def get_advertisers(self):
         try:
@@ -146,14 +146,14 @@ class MercadoLivreAdsCollector:
             while True:
                 try:
                     metrics = ["clicks", "cost", "acos", "total_amount"]
-                    params = {"limit": 50, "offset": offset, "date_from": date_from.strftime('%Y-%m-%d'), "date_to": date_to.strftime('%Y-%m-%d'), "metrics": ",".join(metrics)}
+                    params = {"limit": 50, "offset": offset, "date_from": date_from.strftime("%Y-%m-%d"), "date_to": date_to.strftime("%Y-%m-%d"), "metrics": ",".join(metrics)}
                     response = self.session.get(f"{self.base_url}/advertising/advertisers/{advertiser_id}/product_ads/campaigns", params=params, headers={"Api-Version": "2"})
                     response.raise_for_status()
                     data = response.json()
-                    results = data.get('results')
+                    results = data.get("results")
                     if not results: break
                     all_campaigns.extend(results)
-                    if offset + 50 >= data.get('paging', {}).get('total', 0): break
+                    if offset + 50 >= data.get("paging", {}).get("total", 0): break
                     offset += 50
                     time.sleep(0.1)
                 except requests.exceptions.RequestException as e:
@@ -198,7 +198,7 @@ def load_clients():
         try:
             return pd.read_csv(CLIENTS_FILE)
         except pd.errors.EmptyDataError:
-            return pd.DataFrame(columns=['client_name', 'app_id', 'client_secret', 'refresh_token'])
+            return pd.DataFrame(columns=["client_name", "app_id", "client_secret", "refresh_token"])
     return None
 
 clients_df = load_clients()
@@ -239,57 +239,103 @@ if start_button and selected_client_name:
         collector = MercadoLivreAdsCollector(access_token)
         
         advertisers_data = collector.get_advertisers()
-        if advertisers_data and advertisers_data.get('advertisers'):
-            advertiser = advertisers_data['advertisers'][0]
-            advertiser_id = advertiser['advertiser_id']
-            client_name_from_api = advertiser.get('advertiser_name', selected_client_name)
+        if advertisers_data and advertisers_data.get("advertisers"):
+            advertiser = advertisers_data["advertisers"][0]
+            advertiser_id = advertiser["advertiser_id"]
+            client_name_from_api = advertiser.get("advertiser_name", selected_client_name)
             
             st.write(f"Anunciante encontrado: {client_name_from_api} (ID: {advertiser_id})")
-            timestamp_geracao = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            periodo_consulta = f"{start_date.strftime('%Y-%m-%d')} a {end_date.strftime('%Y-%m-%d')}"
+            timestamp_geracao = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            periodo_consulta = f"{start_date.strftime("%Y-%m-%d")} a {end_date.strftime("%Y-%m-%d")}"
 
-            # 1. Exportar Métricas Gerais
+            # Coletar Métricas Gerais
             user_id = collector.get_user_id()
+            business_metrics = {}
             if user_id:
                 business_metrics = collector.get_orders_metrics(user_id, start_date, end_date)
-                if business_metrics:
-                    df_business = pd.DataFrame(list(business_metrics.items()), columns=['Metrica', 'Valor'])
-                    df_business.insert(0, 'data_geracao', timestamp_geracao)
-                    df_business.insert(1, 'periodo_consulta', periodo_consulta)
-                    export_to_google_sheets(df_business, sheet_name, f"{client_name_from_api} - Metricas Gerais")
 
+            # Coletar Métricas de Publicidade (corrigido para incluir todas as métricas)
             ads_metrics = collector.get_ads_summary_metrics(advertiser_id, start_date, end_date)
-            if ads_metrics:
-                df_ads = pd.DataFrame(list(ads_metrics.items()), columns=['Metrica', 'Valor'])
-                df_ads.insert(0, 'data_geracao', timestamp_geracao)
-                df_ads.insert(1, 'periodo_consulta', periodo_consulta)
-                export_to_google_sheets(df_ads, sheet_name, f"{client_name_from_api} - Metricas Publicidade")
 
-            # 2. Coletar e Analisar Dados de Campanhas
+            # Coletar e Analisar Dados de Campanhas
             campaigns_data = collector.get_all_campaigns_paginated(advertiser_id, start_date, end_date)
+            df_analysis = pd.DataFrame()
             if campaigns_data:
                 df_campaigns_raw = pd.json_normalize(campaigns_data)
-                
                 st.info("Realizando analise estrategica das campanhas...")
                 df_analysis = analyze_and_consolidate(df_campaigns_raw)
-                
-                df_analysis.insert(0, 'data_geracao', timestamp_geracao)
-                df_analysis.insert(1, 'periodo_consulta', periodo_consulta)
-                
-                # 3. Selecionar e ordenar as colunas para a planilha final de análise
-                colunas_finais = [
-                    'data_geracao', 'periodo_consulta', 'Nome_Campanha', 'status', 
-                    'Orcamento_Campanha', 'Orcamento_Recomendado',
-                    'ACOS_Campanha', 'ACOS_Recomendado',
-                    'Estrategia_Recomendada'
-                ]
-                colunas_existentes = [col for col in colunas_finais if col in df_analysis.columns]
-                
-                url = export_to_google_sheets(df_analysis[colunas_existentes], sheet_name, f"{client_name_from_api} - Analise de Estrategia")
 
-                if url:
-                    st.success(f"Processo finalizado! Acesse a planilha aqui: {url}")
+            # --- Lógica para a aba 'Dados Consolidados' ---
+            # Se não há campanhas, criar pelo menos uma linha com dados gerais para a aba consolidada
+            max_campaign_len_consolidated = 1 # Sempre terá pelo menos uma linha para dados gerais
+
+            # Cria um dicionário com os dados consolidados para a primeira aba
+            final_data_consolidated = {
+                "data_geracao": [timestamp_geracao] * max_campaign_len_consolidated,
+                "periodo_consulta": [periodo_consulta] * max_campaign_len_consolidated,
+                "cliente": [client_name_from_api] * max_campaign_len_consolidated,
+                "faturamento_bruto": [business_metrics.get("faturamento_bruto", "N/A")] * max_campaign_len_consolidated,
+                "unidades_vendidas": [business_metrics.get("unidades_vendidas", "N/A")] * max_campaign_len_consolidated,
+                "total_de_vendas": [business_metrics.get("total_de_vendas", "N/A")] * max_campaign_len_consolidated,
+                "ticket_medio": [business_metrics.get("ticket_medio", "N/A")] * max_campaign_len_consolidated,
+                "ads_cost": [ads_metrics.get("cost", "N/A")] * max_campaign_len_consolidated,
+                "ads_direct_amount": [ads_metrics.get("direct_amount", "N/A")] * max_campaign_len_consolidated,
+                "ads_indirect_amount": [ads_metrics.get("indirect_amount", "N/A")] * max_campaign_len_consolidated,
+                "ads_total_amount": [ads_metrics.get("total_amount", "N/A")] * max_campaign_len_consolidated,
+                "ads_acos": [ads_metrics.get("acos", "N/A")] * max_campaign_len_consolidated,
+            }
+
+            # Cria o DataFrame final consolidado
+            df_final_consolidated = pd.DataFrame(final_data_consolidated)
+
+            # Reordenar colunas para corresponder ao template (ajuste conforme necessário)
+            colunas_template_consolidated = [
+                "data_geracao", "periodo_consulta", "cliente",
+                "faturamento_bruto", "unidades_vendidas", "total_de_vendas", "ticket_medio",
+                "ads_cost", "ads_direct_amount", "ads_indirect_amount", "ads_total_amount", "ads_acos"
+            ]
+            
+            # Filtrar colunas que existem no DataFrame final e reordenar
+            colunas_existentes_consolidated = [col for col in colunas_template_consolidated if col in df_final_consolidated.columns]
+            df_final_consolidated = df_final_consolidated[colunas_existentes_consolidated]
+
+            # Exportar para a aba 'Dados Consolidados'
+            url_consolidated = export_to_google_sheets(df_final_consolidated, sheet_name, "Dados Consolidados")
+
+            # --- Lógica para a aba 'Analise de Campanhas' ---
+            if not df_analysis.empty:
+                # Adicionar colunas de data_geracao, periodo_consulta e cliente ao df_analysis
+                df_analysis.insert(0, "data_geracao", timestamp_geracao)
+                df_analysis.insert(1, "periodo_consulta", periodo_consulta)
+                df_analysis.insert(2, "cliente", client_name_from_api)
+
+                # Selecionar e ordenar as colunas para a planilha final de análise de campanhas
+                colunas_analise_campanha = [
+                    "data_geracao", "periodo_consulta", "cliente",
+                    "Nome_Campanha", "status", 
+                    "Orcamento_Campanha", "Orcamento_Recomendado",
+                    "ACOS_Campanha", "ACOS_Recomendado",
+                    "Estrategia_Recomendada"
+                ]
+                colunas_existentes_analise = [col for col in colunas_analise_campanha if col in df_analysis.columns]
+                
+                df_campaign_analysis = df_analysis[colunas_existentes_analise]
+
+                # Exportar para a aba 'Analise de Campanhas'
+                url_campaign_analysis = export_to_google_sheets(df_campaign_analysis, sheet_name, "Analise de Campanhas")
+
+                if url_consolidated and url_campaign_analysis:
+                    st.success(f"Processo finalizado! Acesse a planilha consolidada aqui: {url_consolidated}")
+                    st.success(f"Acesse a planilha de análise de campanhas aqui: {url_campaign_analysis}")
+                elif url_consolidated:
+                    st.warning(f"Processo finalizado para dados consolidados, mas houve erro na análise de campanhas. Acesse a planilha consolidada aqui: {url_consolidated}")
+                else:
+                    st.error("Erro ao exportar dados para o Google Sheets.")
             else:
-                st.info("Nenhum dado detalhado de campanha foi encontrado para o periodo.")
+                st.info("Nenhum dado detalhado de campanha foi encontrado para o periodo. Apenas a aba de Dados Consolidados será gerada.")
+                if url_consolidated:
+                    st.success(f"Processo finalizado! Acesse a planilha consolidada aqui: {url_consolidated}")
+                else:
+                    st.error("Erro ao exportar dados consolidados para o Google Sheets.")
         else:
             st.error("Nenhum anunciante encontrado com o token de acesso gerado.")
