@@ -39,4 +39,4 @@ jobs:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           MELI_CLIENTS_CSV: ${{ secrets.MELI_CLIENTS_CSV }}
         # Garante que o script correto seja executado.
-        run: python realtime_update.py
+        run: python daily_collector.py
