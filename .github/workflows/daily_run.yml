@@ -1,11 +1,23 @@
-name: Execucao da Analise de Campanhas
+name: Execucao Periodica de Atualizacao de Dados
 
 on:
-  # O único gatilho agora é o manual/externo, que o Google vai usar
+  # Mantém o gatilho manual para que você possa executar a qualquer momento.
   workflow_dispatch:
 
+  # Adiciona o agendamento para 4 execuções diárias.
+  schedule:
+    # Horários em UTC (3 horas à frente do fuso de Brasília - BRT)
+    # 09:00 BRT -> 12:00 UTC
+    - cron: '0 12 * * *'
+    # 13:00 BRT -> 16:00 UTC
+    - cron: '0 16 * * *'
+    # 17:00 BRT -> 20:00 UTC
+    - cron: '0 20 * * *'
+    # 21:00 BRT -> 00:00 UTC (do dia seguinte)
+    - cron: '0 0 * * *'
+
 jobs:
-  run-analysis:
+  run-realtime-update:
     runs-on: ubuntu-latest
     steps:
       - name: 1. Checkout do Repositório
@@ -21,8 +33,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 4. Executar o Script de Análise
+      - name: 4. Executar o Script de Atualização em Tempo Real
         env:
+          # As credenciais são lidas a partir dos Segredos do seu repositório no GitHub.
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           MELI_CLIENTS_CSV: ${{ secrets.MELI_CLIENTS_CSV }}
-        run: python daily_run.py
+        # Garante que o script correto seja executado.
+        run: python realtime_update.py
