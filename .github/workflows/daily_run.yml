@@ -9,8 +9,8 @@ on:
     # Horários em UTC (3 horas à frente do fuso de Brasília - BRT)
     # 09:00 BRT -> 12:00 UTC
     - cron: '0 12 * * *'
-    # 13:00 BRT -> 16:00 UTC
-    - cron: '0 16 * * *'
+    # 11:30 BRT -> 16:00 UTC
+    - cron: '30 14 * * *'
     # 17:00 BRT -> 20:00 UTC
     - cron: '0 20 * * *'
     # 21:00 BRT -> 00:00 UTC (do dia seguinte)
