@@ -9,356 +9,320 @@ from google.oauth2.service_account import Credentials
 import os
 from io import StringIO
 import toml
+import json
+import argparse # <-- 1. Importado para lidar com argumentos de linha de comando
 
 # --- Configuração do Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Módulos de Análise, Autenticação e Coleta ---
+# --- Constantes e Configurações ---
+# O STATE_FILE foi removido, pois a lógica agora é determinística (hoje ou ontem)
+API_TIMEOUT = 60
+MAX_RETRIES = 3
 
-def find_best_strategy(campaign_row, strategy_model_df):
-    best_match_name = "Nenhuma estrategia recomendada"
-    min_acos_diff = float("inf")
-    campaign_acos = campaign_row.get("metrics.acos", 0) or 0
-    for _, strategy_row in strategy_model_df.iterrows():
-        strategy_acos = strategy_row.get("ACOS", 0)
-        acos_diff = abs(campaign_acos - strategy_acos)
-        if acos_diff < min_acos_diff:
-            min_acos_diff = acos_diff
-            best_match_name = strategy_row.get("Nome")
-    return best_match_name
-
-def analyze_and_consolidate(campaigns_df):
-    if campaigns_df.empty:
-        return pd.DataFrame()
-    
-    # --- CORREÇÃO: A variável é definida aqui dentro ---
-    hardcoded_strategy_model_data = [
-        {"Nome": "01A - Hig Perforrmance Stage1", "Orçamento": 4500, "ACOS Objetivo": 8, "ACOS": 8},
-        {"Nome": "01B - High Performance Stage2", "Orçamento": 1800, "ACOS Objetivo": 7, "ACOS": 7},
-        {"Nome": "01C - High Performance Stage3", "Orçamento": 2200, "ACOS Objetivo": 8, "ACOS": 8},
-        {"Nome": "Aceleração dinamica 20/8", "Orçamento": 20000, "ACOS Objetivo": 8, "ACOS": 8},
-        {"Nome": "Aceleração dinamica 850/22", "Orçamento": 850, "ACOS Objetivo": 22, "ACOS": 22},
-        {"Nome": "Aceleração dinamica 20/20", "Orçamento": 20000, "ACOS Objetivo": 20, "ACOS": 20},
-        {"Nome": "Aceleração dinamica 10/08", "Orçamento": 10000, "ACOS Objetivo": 8, "ACOS": 8},
-        {"Nome": "Alavanca Full", "Orçamento": 1000, "ACOS Objetivo": 45, "ACOS": 45},
-        {"Nome": "Anuncio Novo Stage1", "Orçamento": 5000, "ACOS Objetivo": 8, "ACOS": 8},
-        {"Nome": "Anuncio Novo Stage2", "Orçamento": 15000, "ACOS Objetivo": 3, "ACOS": 3},
-        {"Nome": "Anuncio Novo Stage3", "Orçamento": 10000, "ACOS Objetivo": 8, "ACOS": 8},
-        {"Nome": "Acos Elevado", "Orçamento": 50, "ACOS Objetivo": 6, "ACOS": 6},
-        {"Nome": "Recorrencia de vendas", "Orçamento": 15, "ACOS Objetivo": 5, "ACOS": 5}
-    ]
-    strategy_model_df = pd.DataFrame(hardcoded_strategy_model_data)
-
-    campaigns_df["Estrategia_Recomendada"] = campaigns_df.apply(lambda row: find_best_strategy(row, strategy_model_df), axis=1)
-    strategy_data_for_merge = strategy_model_df.rename(columns={"Nome": "Estrategia_Nome_Match", "Orçamento": "Orcamento_Recomendado", "ACOS": "ACOS_Recomendado"})
-    consolidated_df = pd.merge(campaigns_df, strategy_data_for_merge, how="left", left_on="Estrategia_Recomendada", right_on="Estrategia_Nome_Match")
-    consolidated_df = consolidated_df.rename(columns={"name": "Nome_Campanha", "budget": "Orcamento_Campanha", "metrics.acos": "ACOS_Campanha"})
-    return consolidated_df
-
+# --- Funções de Autenticação ---
+# As funções de estado (load_state, save_state) foram removidas
 def get_new_access_token(client_info):
     url = "https://api.mercadolibre.com/oauth/token"
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     data = {
-        "grant_type": "refresh_token",
-        "client_id": client_info["app_id"],
-        "client_secret": client_info["client_secret"],
-        "refresh_token": client_info["refresh_token"]
+        "grant_type": "refresh_token", "client_id": client_info["app_id"],
+        "client_secret": client_info["client_secret"], "refresh_token": client_info["refresh_token"]
     }
     try:
-        response = requests.post(url, headers=headers, data=data)
+        response = requests.post(url, headers=headers, data=data, timeout=API_TIMEOUT)
         response.raise_for_status()
+        logger.info("Access Token renovado com sucesso.")
         return response.json()["access_token"]
     except requests.exceptions.RequestException as e:
-        logger.error(f"Erro ao renovar o Access Token: {e.response.json()}")
+        logger.error(f"Erro ao renovar o Access Token: {e.response.json() if e.response else e}")
         return None
 
+# --- Módulo de Coleta de Dados ---
 class MercadoLivreAdsCollector:
     def __init__(self, access_token):
         self.access_token = access_token
         self.base_url = "https://api.mercadolibre.com"
         self.session = requests.Session()
-        self.session.headers.update({"Authorization": f"Bearer {self.access_token}", "Content-Type": "application/json"})
-        self.timeout = 30
+        self.session.headers.update({"Authorization": f"Bearer {self.access_token}"})
+
+    def _make_request(self, url, params=None, headers=None):
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = self.session.get(url, params=params, headers=headers, timeout=API_TIMEOUT)
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"Tentativa {attempt + 1}/{MAX_RETRIES} falhou para {url}. Erro: {e}")
+                if attempt + 1 == MAX_RETRIES:
+                    logger.error("Número máximo de retentativas atingido.")
+                    raise
+                time.sleep(5 * (attempt + 1))
+        return None
 
     def get_user_id(self):
         try:
-            response = self.session.get(f"{self.base_url}/users/me", timeout=self.timeout)
-            response.raise_for_status()
-            return response.json().get('id')
+            data = self._make_request(f"{self.base_url}/users/me")
+            return data.get('id') if data else None
         except Exception as e:
-            logger.error(f"Erro ao obter ID do usuário: {e}")
+            logger.error(f"Não foi possível obter o ID do usuário: {e}")
             return None
 
     def get_business_metrics(self, seller_id, date_str):
-        logger.info("Coletando métricas de negócio (pedidos, visitas)...")
-        date_from_str, date_to_str = f"{date_str}T00:00:00.000-03:00", f"{date_str}T23:59:59.999-03:00"
+        logger.info(f"Iniciando coleta de métricas para {date_str}...")
+        brasil_timezone = ZoneInfo("America/Sao_Paulo")
+        target_date_object = datetime.strptime(date_str, '%Y-%m-%d').date()
+        date_from_str = f"{date_str}T00:00:00.000-03:00"
+        date_to_str = f"{date_str}T23:59:59.999-03:00"
         
-        orders_metrics = {}
-        try:
-            params = {"seller": seller_id, "order.date_created.from": date_from_str, "order.date_created.to": date_to_str, "sort": "date_desc"}
-            response = self.session.get(f"{self.base_url}/orders/search", params=params, timeout=self.timeout)
-            response.raise_for_status()
-            data = response.json()
-            valid_orders = [o for o in data.get('results', []) if o.get('status') in ['paid', 'shipped', 'delivered']]
-            if valid_orders:
-                vendas_brutas = sum(o.get('total_amount', 0) for o in valid_orders)
-                orders_metrics = {
-                    "faturamento_bruto": vendas_brutas,
-                    "unidades_vendidas": sum(item.get('quantity', 0) for o in valid_orders for item in o.get('order_items', [])),
-                    "quantidade_vendas": len(valid_orders)
-                }
-        except Exception as e:
-            logger.error(f"Erro ao buscar pedidos: {e}")
+        all_orders, offset, limit = [], 0, 50
+        
+        while True:
+            params = {
+                "seller": seller_id, "order.date_created.from": date_from_str,
+                "order.date_created.to": date_to_str, "sort": "date_desc",
+                "offset": offset, "limit": limit
+            }
+            logger.info(f"Buscando pedidos... Página com offset {offset}")
+            data = self._make_request(f"{self.base_url}/orders/search", params=params)
+            if not data:
+                raise Exception(f"Falha irrecuperável ao buscar página de pedidos com offset {offset}")
+            page_orders = data.get('results', [])
+            all_orders.extend(page_orders)
+            
+            paging = data.get('paging', {})
+            if (paging.get('offset', 0) + limit) >= paging.get('total', 0):
+                logger.info(f"Paginação concluída. Total de {len(all_orders)} pedidos recebidos da API.")
+                break
+            offset += limit
 
+        valid_orders = []
+        reasons_for_discard = {'wrong_date': 0, 'test_order': 0}
+
+        for order in all_orders:
+            order_date_obj = pd.to_datetime(order.get("date_created")).tz_convert(brasil_timezone)
+            if order_date_obj.date() != target_date_object:
+                reasons_for_discard['wrong_date'] += 1; continue
+            
+            if "test_order" in order.get("tags", []):
+                reasons_for_discard['test_order'] += 1; continue
+            
+            valid_orders.append(order)
+        
+        logger.info(f"Pedidos válidos para soma (após filtro de data e teste): {len(valid_orders)}.")
+        logger.info(f"Pedidos descartados: {reasons_for_discard}")
+
+        orders_metrics = {}
+        if valid_orders:
+            faturamento = sum(o.get('total_amount', 0) for o in valid_orders)
+            unidades_vendidas = sum(item.get('quantity', 0) for o in valid_orders for item in o.get('order_items', []))
+            orders_metrics = {"faturamento_bruto": faturamento, "unidades_vendidas": unidades_vendidas, "quantidade_vendas": len(valid_orders)}
+        
+        logger.info(f"-- Resumo do dia {date_str} -- Vendas: {orders_metrics.get('quantidade_vendas', 0)}, Unidades: {orders_metrics.get('unidades_vendidas', 0)}, Faturamento: R$ {orders_metrics.get('faturamento_bruto', 0):.2f}")
+        
         visits_metrics = {}
         try:
-            url = f"https://api.mercadolibre.com/users/{seller_id}/items_visits?date_from={date_str}&date_to={date_str}"
-            response = self.session.get(url, timeout=self.timeout)
-            response.raise_for_status()
-            visits_data = response.json()
-            total_visits = visits_data.get("total_visits", 0)
-            visits_metrics = {"visitas": total_visits}
+            visits_data = self._make_request(f"https://api.mercadolibre.com/users/{seller_id}/items_visits", params={"date_from": date_str, "date_to": date_str})
+            if visits_data: visits_metrics = {"visitas": visits_data.get("total_visits", 0)}
         except Exception as e:
-            logger.error(f"Erro ao buscar visitas: {e}")
-            
+            logger.error(f"Falha ao buscar visitas para o dia {date_str}: {e}")
+
         return {**orders_metrics, **visits_metrics}
 
     def get_ads_summary_metrics(self, advertiser_id, date_str):
-        logger.info("Coletando métricas de resumo de publicidade (incluindo impressões)...")
+        params = {"date_from": date_str, "date_to": date_str, "metrics_summary": "true", "metrics": "cost,acos,direct_amount,indirect_amount,total_amount,clicks,prints"}
         try:
-            params = {"date_from": date_str, "date_to": date_str, "metrics_summary": "true", "metrics": "cost,acos,direct_amount,indirect_amount,total_amount,clicks,prints"}
-            response = self.session.get(f"{self.base_url}/advertising/advertisers/{advertiser_id}/product_ads/campaigns", params=params, headers={"Api-Version": "2"}, timeout=self.timeout)
-            response.raise_for_status()
-            return response.json().get("metrics_summary", {})
+            data = self._make_request(f"{self.base_url}/advertising/advertisers/{advertiser_id}/product_ads/campaigns", params=params, headers={"Api-Version": "2"})
+            return data.get("metrics_summary", {}) if data else {}
         except Exception as e:
-            logger.error(f"Erro ao obter resumo de publicidade: {e}")
+            logger.error(f"Falha ao buscar métricas de publicidade para {date_str}: {e}")
             return {}
-
-    def get_all_campaigns_paginated(self, advertiser_id, date_str):
-        all_campaigns, offset = [], 0
-        while True:
-            try:
-                metrics = ["clicks", "cost", "acos", "total_amount"]
-                params = {"limit": 50, "offset": offset, "date_from": date_str, "date_to": date_str, "metrics": ",".join(metrics)}
-                response = self.session.get(f"{self.base_url}/advertising/advertisers/{advertiser_id}/product_ads/campaigns", params=params, headers={"Api-Version": "2"}, timeout=self.timeout)
-                response.raise_for_status()
-                data = response.json()
-                results = data.get('results')
-                if not results: break
-                all_campaigns.extend(results)
-                if offset + 50 >= data.get('paging', {}).get('total', 0): break
-                offset += 50
-                time.sleep(0.2)
-            except Exception as e:
-                logger.error(f"Erro ao buscar campanhas: {e}")
-                break
-        return all_campaigns
-
+        
     def get_advertisers(self):
         try:
-            response = self.session.get(f"{self.base_url}/advertising/advertisers", params={"product_id": "PADS"}, headers={"Api-Version": "1"}, timeout=self.timeout)
-            response.raise_for_status()
-            return response.json()
+            data = self._make_request(f"{self.base_url}/advertising/advertisers", params={"product_id": "PADS"}, headers={"Api-Version": "1"})
+            return data if data else None
         except Exception as e:
-            logger.error(f"Erro ao obter anunciantes: {e}")
+            logger.error(f"Falha ao buscar anunciantes: {e}")
             return None
 
-def export_to_google_sheets(df, sheet_name, worksheet_name, google_creds, update_key_cols=None):
-    if update_key_cols is None:
-        update_key_cols = []
-    logger.info(f"Exportando/Atualizando para a aba '{worksheet_name}'...")
+def update_or_append_rows(df_new, worksheet, df_existing_cache, key_cols):
+    logger.info(f"Iniciando atualização em lote da aba '{worksheet.title}' com {len(df_new)} novas linhas.")
+    for col in key_cols:
+        if col in df_existing_cache.columns: df_existing_cache[col] = df_existing_cache[col].astype(str)
+        if col in df_new.columns: df_new[col] = df_new[col].astype(str)
+    try:
+        header = worksheet.row_values(1)
+        if not header:
+            header = df_new.columns.tolist()
+            worksheet.update([header], value_input_option='USER_ENTERED')
+    except gspread.exceptions.APIError as e:
+        logger.error(f"ERRO DE API ao ler o cabeçalho de '{worksheet.title}'. Pausando por 60s. Erro: {e}")
+        time.sleep(60); raise e
+    updates_to_batch, rows_to_append = [], []
+    for _, new_row in df_new.iterrows():
+        match_index = -1
+        if not df_existing_cache.empty:
+            condition = pd.Series([True] * len(df_existing_cache))
+            for col in key_cols:
+                if col in df_existing_cache: condition &= (df_existing_cache[col] == new_row[col])
+            matched_rows = df_existing_cache[condition]
+            if not matched_rows.empty: match_index = matched_rows.index[0]
+        if match_index != -1:
+            row_to_update_num = match_index + 2
+            existing_row_dict = df_existing_cache.iloc[match_index].to_dict()
+            for col, value in new_row.items():
+                if pd.notna(value) and str(value).strip() not in ["", "N/A"]: existing_row_dict[col] = value
+            final_row_values = [existing_row_dict.get(col, "") for col in header]
+            updates_to_batch.append({'range': f'A{row_to_update_num}', 'values': [final_row_values]})
+            for col, value in new_row.items():
+                if col in df_existing_cache: df_existing_cache.loc[match_index, col] = value
+        else:
+            df_aligned = pd.DataFrame([new_row]).reindex(columns=header)
+            rows_to_append.extend(df_aligned.fillna("").values.tolist())
+            df_existing_cache = pd.concat([df_existing_cache, df_aligned], ignore_index=True)
+    try:
+        if updates_to_batch:
+            worksheet.batch_update(updates_to_batch, value_input_option='USER_ENTERED')
+            logger.info(f"SUCESSO: {len(updates_to_batch)} linhas atualizadas em lote.")
+        if rows_to_append:
+            worksheet.append_rows(rows_to_append, value_input_option='USER_ENTERED')
+            logger.info(f"SUCESSO: {len(rows_to_append)} novas linhas adicionadas.")
+    except gspread.exceptions.APIError as e:
+        logger.error(f"ERRO DE API ao escrever em lote. Pausando por 60s. Erro: {e}")
+        time.sleep(60); raise e
+
+
+def main():
+    # <-- 2. Lógica para determinar a data alvo ---
+    parser = argparse.ArgumentParser(description="Coletor de dados do Mercado Livre Ads.")
+    parser.add_argument('--dia-anterior', action='store_true', help='Se definido, executa a coleta para o dia anterior (D-1).')
+    args = parser.parse_args()
+    
+    brasil_timezone = ZoneInfo("America/Sao_Paulo")
+    
+    if args.dia_anterior:
+        target_date = datetime.now(brasil_timezone) - timedelta(days=1)
+        logger.info("Iniciando execução D-1 (dados do dia anterior).")
+    else:
+        target_date = datetime.now(brasil_timezone)
+        logger.info("Iniciando execução em tempo real (dados de hoje).")
+
+    date_str = target_date.strftime('%Y-%m-%d')
+    logger.info(f"Data alvo para a coleta: {date_str}")
+    # --- Fim da lógica da data ---
+
+    try:
+        if os.path.exists('.streamlit/secrets.toml'):
+            secrets = toml.load('.streamlit/secrets.toml'); google_creds = secrets['google_credentials']
+            # Para execução local, você pode querer criar um 'clients.csv'
+            with open('clients.csv', 'r') as f: clients_csv_data = f.read()
+        else:
+            google_creds_str = os.environ['GOOGLE_CREDENTIALS']; clients_csv_data = os.environ['MELI_CLIENTS_CSV']; google_creds = toml.loads(google_creds_str)['google_credentials']
+        clients_df = pd.read_csv(StringIO(clients_csv_data))
+        clients_df['client_name'] = clients_df['client_name'].str.strip()
+    except Exception as e:
+        logger.critical(f"ERRO CRÍTICO ao carregar as credenciais ou o arquivo CSV: {e}")
+        return
+
     try:
         scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(google_creds, scopes=scopes)
-        client = gspread.authorize(creds)
-        spreadsheet = client.open(sheet_name)
-        
-        try:
-            worksheet = spreadsheet.worksheet(worksheet_name)
-            if not worksheet.row_values(1):
-                worksheet.update([df.columns.tolist()], value_input_option='USER_ENTERED')
-                logger.info("Cabeçalho não encontrado na aba. Criando um novo.")
-        except gspread.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows="1", cols=len(df.columns))
-            worksheet.update([df.columns.tolist()], value_input_option='USER_ENTERED')
-            logger.info(f"Aba '{worksheet_name}' não encontrada. Criando aba e cabeçalho.")
-        
-        if not update_key_cols:
-            worksheet.append_rows(df.fillna("").astype(str).values.tolist(), value_input_option='USER_ENTERED')
-            logger.info(f"SUCESSO: Novas linhas adicionadas na aba '{worksheet_name}'.")
-            return
-
-        all_records = worksheet.get_all_records()
-        existing_data_df = pd.DataFrame(all_records)
-        header = worksheet.row_values(1)
-        
-        for index, new_row in df.iterrows():
-            match_index = -1
-            if not existing_data_df.empty and all(k in existing_data_df.columns for k in update_key_cols):
-                condition = pd.Series([True] * len(existing_data_df))
-                for col in update_key_cols:
-                    condition &= (existing_data_df[col].astype(str) == str(new_row[col]))
-                matched_rows = existing_data_df[condition]
-                if not matched_rows.empty:
-                    match_index = matched_rows.index[0]
-
-            if match_index != -1:
-                row_to_update = match_index + 2
-                existing_row_values = worksheet.row_values(row_to_update)
-                existing_row_dict = dict(zip(header, existing_row_values))
-                
-                for col, value in new_row.items():
-                    if pd.notna(value) and str(value).strip() not in ["", "N/A"]:
-                        existing_row_dict[col] = value
-                
-                ordered_new_row_values = [existing_row_dict.get(col, "") for col in header]
-                worksheet.update(range_name=f"A{row_to_update}", values=[ordered_new_row_values], value_input_option='USER_ENTERED')
-                logger.info(f"SUCESSO: Linha {row_to_update} atualizada com segurança.")
-            else:
-                df_aligned = pd.DataFrame(columns=header)
-                df_aligned = pd.concat([df_aligned, pd.DataFrame([new_row])], ignore_index=True)
-                worksheet.append_rows(df_aligned.fillna("").values.tolist(), value_input_option='USER_ENTERED')
-                logger.info(f"SUCESSO: Nova linha adicionada.")
-
+        client_gspread = gspread.authorize(creds)
+        spreadsheet = client_gspread.open("Histórico de Vendas Meli - 2024")
+        worksheet_consolidado = spreadsheet.worksheet("Dados Consolidados v2")
+        df_consolidado_cache = pd.DataFrame(worksheet_consolidado.get_all_records())
     except Exception as e:
-        logger.error(f"ERRO AO EXPORTAR PARA '{worksheet_name}': {e}", exc_info=True)
-
-def main():
-    logger.info("Iniciando a execução da atualização em tempo real (v14 - Final).")
-    
-    try:
-        if os.path.exists('.streamlit/secrets.toml'):
-            secrets = toml.load('.streamlit/secrets.toml')
-            google_creds = secrets['google_credentials']
-            with open('clients.csv', 'r') as f:
-                 clients_csv_data = f.read()
-        else:
-            google_creds_str = os.environ['GOOGLE_CREDENTIALS']
-            clients_csv_data = os.environ['MELI_CLIENTS_CSV']
-            google_creds = toml.loads(google_creds_str)['google_credentials']
-        
-        clients_df = pd.read_csv(StringIO(clients_csv_data))
-    except Exception as e:
-        logger.error(f"ERRO CRÍTICO ao carregar credenciais: {e}")
+        logger.critical(f"ERRO CRÍTICO ao conectar-se com o Google Sheets: {e}")
         return
 
-    brasil_timezone = ZoneInfo("America/Sao_Paulo")
-    today = datetime.now(brasil_timezone)
-    date_str = today.strftime('%Y-%m-%d')
-    
-    logger.info(f"Coletando dados para o dia de hoje: {date_str}")
-
-    # Cabeçalho final conforme especificado no pasted_content.txt
-    FINAL_COLUMNS_ORDER_CONSOLIDATED = [
-        "data_geracao", "periodo_consulta", "cliente",
-        "Faturamento", "Investimento", "Quantidade de Vendas", "Unidades Vendidas", "Visitas",
-        "Taxa de Conversão Média", "ACOS", "TACOS", "ROAS", "ROI Média",
-        "Vendas por Ads", "Vendas sem Ads", "Cliques", "CPC", "CTR", "Impressões"
-    ]
-
-    for index, client_info in clients_df.iterrows():
+    for _, client_info in clients_df.iterrows():
         client_name = client_info["client_name"]
-        logger.info(f"\n--- Processando cliente: {client_name} ---")
+        logger.info(f"\n{'='*50}\n--- Processando cliente: {client_name} para a data {date_str} ---\n{'='*50}")
+
+        # <-- 3. Lógica de data simplificada ---
+        # A lógica de state, last_processed_date, date_range foi removida.
+        # O script agora processa apenas a 'target_date' definida no início.
         
-        try:
-            access_token = get_new_access_token(client_info)
-            if not access_token:
-                logger.error(f"Falha ao obter access token para {client_name}. Pulando.")
-                continue
-                
-            collector = MercadoLivreAdsCollector(access_token)
-            advertisers_data = collector.get_advertisers()
-            
-            if not advertisers_data or not advertisers_data.get('advertisers'):
-                logger.error(f"Nenhum anunciante encontrado para {client_name}. Pulando.")
-                continue
-            
+        access_token = get_new_access_token(client_info)
+        if not access_token: continue
+
+        collector = MercadoLivreAdsCollector(access_token)
+        
+        user_id = collector.get_user_id()
+        if not user_id:
+            logger.error(f"Não foi possível obter o user_id para {client_name}. Pulando para o próximo cliente.")
+            continue
+
+        advertisers_data = collector.get_advertisers()
+        advertiser_id, client_name_from_api = None, client_name
+        if advertisers_data and advertisers_data.get('advertisers'):
             advertiser = advertisers_data['advertisers'][0]
             advertiser_id = advertiser['advertiser_id']
             client_name_from_api = advertiser.get('advertiser_name', client_name)
-            timestamp_geracao = datetime.now(brasil_timezone).strftime('%Y-%m-%d %H:%M:%S')
-
-            user_id = collector.get_user_id()
-            business_metrics = collector.get_business_metrics(user_id, date_str) if user_id else {}
-            ads_metrics = collector.get_ads_summary_metrics(advertiser_id, date_str)
+        else:
+            logger.warning(f"Nenhum anunciante encontrado para {client_name}. Métricas de Ads não serão coletadas.")
+        
+        try:
+            # O loop de datas foi removido, o código agora executa uma única vez por cliente.
+            business_metrics = collector.get_business_metrics(seller_id=user_id, date_str=date_str)
+            ads_metrics = collector.get_ads_summary_metrics(advertiser_id, date_str) if advertiser_id else {}
             
-            # Processamento das métricas com valores numéricos
             faturamento = pd.to_numeric(business_metrics.get("faturamento_bruto"), errors='coerce')
             qtde_vendas = pd.to_numeric(business_metrics.get("quantidade_vendas"), errors='coerce')
             visitas = pd.to_numeric(business_metrics.get("visitas"), errors='coerce')
             unidades_vendidas = pd.to_numeric(business_metrics.get("unidades_vendidas"), errors='coerce')
-
             investimento_ads = pd.to_numeric(ads_metrics.get("cost"), errors='coerce')
             vendas_ads = pd.to_numeric(ads_metrics.get("total_amount"), errors='coerce')
             impressoes = pd.to_numeric(ads_metrics.get("prints"), errors='coerce')
             cliques = pd.to_numeric(ads_metrics.get("clicks"), errors='coerce')
-            acos = pd.to_numeric(ads_metrics.get("acos"), errors='coerce')
+            acos_percent = pd.to_numeric(ads_metrics.get("acos"), errors='coerce')
 
-            # Novos cálculos conforme especificado
-            taxa_conversao_media = (qtde_vendas / visitas * 100) if pd.notna(qtde_vendas) and pd.notna(visitas) and visitas > 0 else 0
+            taxa_conversao = (qtde_vendas / visitas * 100) if pd.notna(qtde_vendas) and pd.notna(visitas) and visitas > 0 else 0
             tacos = (investimento_ads / faturamento * 100) if pd.notna(investimento_ads) and pd.notna(faturamento) and faturamento > 0 else 0
             roas = (vendas_ads / investimento_ads) if pd.notna(vendas_ads) and pd.notna(investimento_ads) and investimento_ads > 0 else 0
             vendas_sem_ads = (faturamento - vendas_ads) if pd.notna(faturamento) and pd.notna(vendas_ads) else faturamento
             cpc = (investimento_ads / cliques) if pd.notna(investimento_ads) and pd.notna(cliques) and cliques > 0 else 0
             ctr = (cliques / impressoes * 100) if pd.notna(cliques) and pd.notna(impressoes) and impressoes > 0 else 0
 
-            # Dados consolidados com formatação adequada
-            final_data = { "data_geracao": timestamp_geracao, "periodo_consulta": date_str, "cliente": client_name_from_api }
+            final_data = {
+                "data_geracao": datetime.now(brasil_timezone).strftime('%Y-%m-%d %H:%M:%S'),
+                "periodo_consulta": date_str,
+                "cliente": client_name_from_api,
+                "Faturamento": f"R$ {faturamento:,.2f}" if pd.notna(faturamento) else "R$ 0,00",
+                "Investimento": f"R$ {investimento_ads:,.2f}" if pd.notna(investimento_ads) else None,
+                "Quantidade de Vendas": int(qtde_vendas) if pd.notna(qtde_vendas) else 0,
+                "Unidades Vendidas": int(unidades_vendidas) if pd.notna(unidades_vendidas) else 0,
+                "Visitas": int(visitas) if pd.notna(visitas) else 0,
+                "Taxa de Conversão Média": f"{taxa_conversao:.2f}%" if taxa_conversao > 0 else None,
+                "ACOS": f"{acos_percent:.2f}%" if pd.notna(acos_percent) else None,
+                "TACOS": f"{tacos:.2f}%" if tacos > 0 else None,
+                "ROAS": f"{roas:.2f}" if roas > 0 else None,
+                "ROI Média": f"{roas:.2f}" if roas > 0 else None,
+                "Vendas por Ads": f"R$ {vendas_ads:,.2f}" if pd.notna(vendas_ads) else None,
+                "Vendas sem Ads": f"R$ {vendas_sem_ads:,.2f}" if pd.notna(vendas_sem_ads) else None,
+                "Cliques": int(cliques) if pd.notna(cliques) else None,
+                "CPC": f"R$ {cpc:,.2f}" if cpc > 0 else None,
+                "CTR": f"{ctr:.2f}%" if ctr > 0 else None,
+                "Impressões": int(impressoes) if pd.notna(impressoes) else None,
+            }
 
-            if pd.notna(faturamento): final_data["Faturamento"] = f"R$ {faturamento:,.2f}"
-            if pd.notna(investimento_ads): final_data["Investimento"] = f"R$ {investimento_ads:,.2f}"
-            if pd.notna(qtde_vendas): final_data["Quantidade de Vendas"] = int(qtde_vendas)
-            if pd.notna(unidades_vendidas): final_data["Unidades Vendidas"] = int(unidades_vendidas)
-            if pd.notna(visitas): final_data["Visitas"] = int(visitas)
-            if taxa_conversao_media > 0: final_data["Taxa de Conversão Média"] = f"{taxa_conversao_media:.2f}%"
-            if pd.notna(acos): final_data["ACOS"] = f"{acos:.2f}%"
-            if tacos > 0: final_data["TACOS"] = f"{tacos:.2f}%"
-            if roas > 0: final_data["ROAS"] = f"{roas:.2f}"
-            if roas > 0: final_data["ROI Média"] = f"{roas:.2f}"
-            if pd.notna(vendas_ads): final_data["Vendas por Ads"] = f"R$ {vendas_ads:,.2f}"
-            if pd.notna(vendas_sem_ads): final_data["Vendas sem Ads"] = f"R$ {vendas_sem_ads:,.2f}"
-            if pd.notna(cliques): final_data["Cliques"] = int(cliques)
-            if cpc > 0: final_data["CPC"] = f"R$ {cpc:,.2f}"
-            if ctr > 0: final_data["CTR"] = f"{ctr:.2f}%"
-            if pd.notna(impressoes): final_data["Impressões"] = int(impressoes)
-            
-            df_final_consolidated = pd.DataFrame([final_data])
-            df_final_consolidated = df_final_consolidated.reindex(columns=FINAL_COLUMNS_ORDER_CONSOLIDATED)
-            
-            update_keys_consolidated = ['periodo_consulta', 'cliente']
-            export_to_google_sheets(df_final_consolidated, "Histórico de Vendas Meli - 2024", "Dados Consolidados v2", google_creds, update_key_cols=update_keys_consolidated)
+            FINAL_COLUMNS_ORDER = list(df_consolidado_cache.columns)
+            if not FINAL_COLUMNS_ORDER:
+                FINAL_COLUMNS_ORDER = list(final_data.keys())
 
-            # Mantendo a funcionalidade original de análise de campanhas
-            logger.info("Coletando dados detalhados de campanhas para o dia...")
-            campaigns_data = collector.get_all_campaigns_paginated(advertiser_id, date_str)
-            if campaigns_data:
-                df_campaigns_raw = pd.json_normalize(campaigns_data)
-                logger.info("Realizando analise estrategica...")
-                df_analysis = analyze_and_consolidate(df_campaigns_raw)
-                
-                df_analysis.insert(0, 'data_geracao', timestamp_geracao)
-                df_analysis.insert(1, 'periodo_consulta', date_str)
-                df_analysis.insert(2, 'cliente', client_name_from_api)
-                
-                colunas_finais = [
-                    'data_geracao', 'periodo_consulta', 'cliente', 'Nome_Campanha', 'status', 
-                    'Orcamento_Campanha', 'Orcamento_Recomendado', 
-                    'ACOS_Campanha', 'ACOS_Recomendado', 'Estrategia_Recomendada'
-                ]
-                # Garante que apenas colunas existentes sejam selecionadas
-                colunas_existentes_df = [col for col in colunas_finais if col in df_analysis.columns]
-                
-                update_keys_campaigns = ['periodo_consulta', 'cliente', 'Nome_Campanha']
-                export_to_google_sheets(df_analysis[colunas_existentes_df], "Histórico de Vendas Meli - 2024", "Analise de Campanhas", google_creds, update_key_cols=update_keys_campaigns)
-            else:
-                logger.info(f"Nenhuma campanha encontrada para {client_name_from_api} no dia de hoje.")
+            df_final = pd.DataFrame([final_data]).reindex(columns=FINAL_COLUMNS_ORDER)
+            update_or_append_rows(df_final, worksheet_consolidado, df_consolidado_cache, ['periodo_consulta', 'cliente'])
+            
+            # A chamada para save_state() foi removida daqui
+            time.sleep(1.5)
 
         except Exception as e:
-            logger.error(f"ERRO INESPERADO ao processar o cliente {client_name}: {e}", exc_info=True)
+            logger.error(f"ERRO IRRECUPERÁVEL ao processar o dia {date_str} para {client_name}. O script continuará para o próximo cliente. Erro: {e}", exc_info=True)
             continue # Continua para o próximo cliente em caso de erro
 
-    logger.info("Atualização em tempo real (v14 - Final) finalizada.")
+    logger.info("\nExecução finalizada.")
 
 if __name__ == "__main__":
     main()
